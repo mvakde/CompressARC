@@ -33,9 +33,18 @@ import solve_task
 # Getting all the task names, setting defaults and constants
 multiprocessing.set_start_method('spawn', force=True)
 torch.set_default_dtype(torch.float32)
-torch.set_default_device('cuda')
-torch.backends.cudnn.benchmark = True
-torch.backends.cuda.matmul.allow_tf32 = True
+
+if torch.cuda.is_available():
+    device = "cuda"
+    torch.set_default_device(device)
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+elif torch.backends.mps.is_available():
+    device = "mps"
+    torch.set_default_device(device)
+else:
+    device = "cpu"
+    torch.set_default_device(device)
 
 # Function that can spawn processes thata solve a puzzle, and schedule them on GPUs to take up each GPUs quota
 # "quota/usage" here is just a number per puzzle/GPU given to the function. It can be memory, or job count, or
@@ -121,7 +130,6 @@ if __name__ == '__main__':
     start_time = time.time()
 
     n_cpus = multiprocessing.cpu_count()
-    n_gpus = torch.cuda.device_count()
 
     # Find all the puzzle names
     split = "training"
@@ -131,20 +139,45 @@ if __name__ == '__main__':
     del problems
     n_tasks = len(task_names)
 
-    # Measuring the amount of memory used for every task
-    gpu_memory_quotas = [torch.cuda.mem_get_info(i)[0] for i in range(n_gpus)]
+    if device == "cuda":
+        n_gpus = torch.cuda.device_count()
+        # Measuring the amount of memory used for every task
+        gpu_memory_quotas = [torch.cuda.mem_get_info(i)[0] for i in range(n_gpus)]
+        gpu_task_quotas = [int(gpu_memory_quota // (4 * 1024**3)) for gpu_memory_quota in gpu_memory_quotas]
+        task_usages = [1 for i in range(n_tasks)]
+    elif device == "mps":
+        n_gpus = 1
+        # For the first run to measure memory, we use a quota based on number of parallel tasks
+        # to avoid running too many at once. Let's use half the CPU cores.
+        task_quota = max(1, n_cpus // 2)
+        gpu_task_quotas = [task_quota]
+        task_usages = [1 for i in range(n_tasks)]
+    else: # cpu
+        n_gpus = 1 # Fake a single 'gpu' for the scheduler
+        gpu_task_quotas = [n_cpus]
+        task_usages = [1 for i in range(n_tasks)]
 
-    gpu_task_quotas = [int(gpu_memory_quota // (4 * 1024**3)) for gpu_memory_quota in gpu_memory_quotas]
-    task_usages = [1 for i in range(n_tasks)]
     memory_dict, _, _ = parallelize_runs(gpu_task_quotas, task_usages, 2, verbose=True)
 
     # Sort the tasks by decreasing memory usage
     tasks = sorted(memory_dict.items(), key=lambda x: x[1], reverse=True)
     task_names, task_memory_usages = zip(*tasks)
+    task_memory_usages = list(task_memory_usages)
 
     # Computing the solution for every task, while saturating memory
     n_steps = 2000
-    safe_gpu_memory_quotas = [memory_quota - 4 * 1024**3 for memory_quota in gpu_memory_quotas]
+    if device == "cuda":
+        safe_gpu_memory_quotas = [memory_quota - 4 * 1024**3 for memory_quota in gpu_memory_quotas]
+    elif device == "mps":
+        # For MPS, total memory isn't easily available. We'll use a default of 16GB.
+        # You can change this value to match your system's memory.
+        MPS_TOTAL_MEM_GB = 16
+        safe_gpu_memory_quotas = [MPS_TOTAL_MEM_GB * 1024**3]
+    else: # cpu
+        # For CPU, we limit by number of processes, not memory.
+        safe_gpu_memory_quotas = [n_cpus]
+        task_memory_usages = [1] * n_tasks
+
     _, solutions_dict, time_taken = parallelize_runs(safe_gpu_memory_quotas, task_memory_usages, n_steps, verbose=True)
 
     # Format the solutions and put into submission file

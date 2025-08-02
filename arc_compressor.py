@@ -8,7 +8,12 @@ import layers
 np.random.seed(0)
 torch.manual_seed(0)
 torch.set_default_dtype(torch.float32)
-torch.set_default_device('cuda')
+if torch.cuda.is_available():
+    torch.set_default_device("cuda")
+elif torch.backends.mps.is_available():
+    torch.set_default_device("mps")
+else:
+    torch.set_default_device("cpu")
 
 
 class ARCCompressor:
